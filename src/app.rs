@@ -45,6 +45,10 @@ pub struct AppModel {
     map_canvas: MapCanvas,
     current_location: Option<(f64, f64)>,
     error_message: Option<String>,
+    pois: Vec<crate::poi::Poi>,
+    poi_fetch_pending: bool,
+    last_poi_fetch: Option<std::time::Instant>,
+    selected_poi_id: Option<u64>,
 
     search_query: String,
     search_results: Vec<SearchResult>,
@@ -67,6 +71,10 @@ pub enum Message {
     CheckTiles,
     TileFetched(TileId, Result<cosmic::iced::widget::image::Handle, String>),
 
+    FetchPois,
+    PoisFetched(Result<Vec<crate::poi::Poi>, String>),
+    SelectPoi(u64),
+
     SearchInput(String),
     SearchSubmit,
     SearchResults(Result<Vec<SearchResult>, String>),
@@ -84,6 +92,8 @@ pub enum Message {
 
     ZoomIn,
     ZoomOut,
+
+    DismissPoiInfo,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -93,6 +103,7 @@ pub enum ContextPage {
     Bookmarks,
     SearchResults,
     AddBookmark,
+    PoiInfo,
 }
 
 impl Application for AppModel {
@@ -154,6 +165,10 @@ impl Application for AppModel {
             map_canvas: MapCanvas::new(map_state, TileCache::new(256)),
             current_location: None,
             error_message: None,
+            pois: Vec::new(),
+            poi_fetch_pending: false,
+            last_poi_fetch: None,
+            selected_poi_id: None,
             search_query: String::new(),
             search_results: Vec::new(),
             bookmark_input: String::new(),
@@ -292,6 +307,28 @@ impl Application for AppModel {
                 context_drawer::context_drawer(content, Message::DismissBookmarkDialog)
                     .title(fl!("menu-add-bookmark"))
             }
+            ContextPage::PoiInfo => {
+                let space_s = cosmic::theme::spacing().space_s;
+                let mut list = widget::column::with_capacity(4)
+                    .spacing(space_s)
+                    .width(Length::Fill);
+
+                if let Some(id) = self.selected_poi_id {
+                    if let Some(poi) = self.pois.iter().find(|p| p.id == id) {
+                        list = list.push(widget::text::heading(&poi.name));
+                        list = list.push(widget::text::body(format!("Category: {}", poi.category)));
+                        list = list.push(widget::text::body(format!("Latitude: {:.5}", poi.lat)));
+                        list = list.push(widget::text::body(format!("Longitude: {:.5}", poi.lon)));
+                    } else {
+                        list = list.push(widget::text::body("POI not found"));
+                    }
+                } else {
+                    list = list.push(widget::text::body("No POI selected"));
+                }
+
+                context_drawer::context_drawer(list, Message::DismissPoiInfo)
+                    .title("Point of Interest")
+            }
         })
     }
 
@@ -418,7 +455,80 @@ impl Application for AppModel {
             }
 
             Message::CheckTiles => {
-                return self.request_missing_tiles();
+                let mut tasks = vec![self.request_missing_tiles()];
+
+                // Throttled POI fetch
+                let should_fetch_pois = {
+                    let state = self.map_canvas.state.lock().unwrap();
+                    let zoom_ok = state.zoom >= 14;
+                    let not_pending = !self.poi_fetch_pending;
+                    let cooldown_ok = self
+                        .last_poi_fetch
+                        .map(|t| t.elapsed().as_secs() >= 5)
+                        .unwrap_or(true);
+                    zoom_ok && not_pending && cooldown_ok
+                };
+                if should_fetch_pois {
+                    tasks.push(Task::perform(
+                        async { Message::FetchPois },
+                        cosmic::Action::App,
+                    ));
+                }
+
+                return Task::batch(tasks);
+            }
+
+            Message::FetchPois => {
+                self.poi_fetch_pending = true;
+                let (min_lat, min_lon, max_lat, max_lon) = {
+                    let state = self.map_canvas.state.lock().unwrap();
+                    let (cx, cy) = state.center_tile();
+                    let dx = (state.viewport_width as f64 / 2.0) / 256.0;
+                    let dy = (state.viewport_height as f64 / 2.0) / 256.0;
+                    let (max_lat, min_lon) = state.tile_to_lat_lon(cx - dx, cy - dy);
+                    let (min_lat, max_lon) = state.tile_to_lat_lon(cx + dx, cy + dy);
+                    (min_lat, min_lon, max_lat, max_lon)
+                };
+                return Task::perform(
+                    async move { crate::poi::fetch_pois(min_lat, min_lon, max_lat, max_lon).await },
+                    |res| cosmic::Action::App(Message::PoisFetched(res)),
+                );
+            }
+
+            Message::PoisFetched(result) => {
+                self.poi_fetch_pending = false;
+                self.last_poi_fetch = Some(std::time::Instant::now());
+                match result {
+                    Ok(pois) => {
+                        tracing::info!("PoisFetched: {} POIs", pois.len());
+                        self.pois = pois;
+                        self.map_canvas.set_pois(&self.pois);
+                    }
+                    Err(e) => {
+                        tracing::warn!("PoisFetched failed: {e}");
+                    }
+                }
+            }
+
+            Message::SelectPoi(id) => {
+                tracing::info!("SelectPoi: {id}");
+                self.selected_poi_id = Some(id);
+                self.map_canvas.set_selected_poi(Some(id));
+                if let Some(poi) = self.pois.iter().find(|p| p.id == id) {
+                    let mut state = self.map_canvas.state.lock().unwrap();
+                    state.center_lat = poi.lat;
+                    state.center_lon = poi.lon;
+                    drop(state);
+                    self.save_view();
+                }
+                self.context_page = ContextPage::PoiInfo;
+                self.core.window.show_context = true;
+            }
+
+            Message::DismissPoiInfo => {
+                self.core.window.show_context = false;
+                self.selected_poi_id = None;
+                self.map_canvas.set_selected_poi(None);
             }
 
             Message::TileFetched(id, result) => {

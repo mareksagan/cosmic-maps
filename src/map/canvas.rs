@@ -12,6 +12,8 @@ pub struct MapCanvas {
     pub state: Mutex<MapState>,
     pub tiles: TileCache,
     current_location: Mutex<Option<(f64, f64)>>,
+    pois: Mutex<Vec<crate::poi::Poi>>,
+    selected_poi_id: Mutex<Option<u64>>,
 }
 
 impl MapCanvas {
@@ -20,11 +22,21 @@ impl MapCanvas {
             state: Mutex::new(state),
             tiles,
             current_location: Mutex::new(None),
+            pois: Mutex::new(Vec::new()),
+            selected_poi_id: Mutex::new(None),
         }
     }
 
     pub fn set_current_location(&self, loc: Option<(f64, f64)>) {
         *self.current_location.lock().unwrap() = loc;
+    }
+
+    pub fn set_pois(&self, pois: &[crate::poi::Poi]) {
+        *self.pois.lock().unwrap() = pois.to_vec();
+    }
+
+    pub fn set_selected_poi(&self, id: Option<u64>) {
+        *self.selected_poi_id.lock().unwrap() = id;
     }
 }
 
@@ -57,6 +69,31 @@ impl Program<crate::app::Message, cosmic::Theme, cosmic::Renderer> for MapCanvas
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if let Some(pos) = cursor.position() {
+                    // Check for POI click
+                    let map_state = self.state.lock().unwrap();
+                    let pois = self.pois.lock().unwrap();
+                    let vw = bounds.width as f64;
+                    let vh = bounds.height as f64;
+                    let (cx, cy) = map_state.center_tile();
+
+                    for poi in pois.iter() {
+                        let (tx, ty) = map_state.lat_lon_to_tile(poi.lat, poi.lon);
+                        let screen_x = (tx - cx) * 256.0 + vw / 2.0;
+                        let screen_y = (ty - cy) * 256.0 + vh / 2.0;
+                        let dx = pos.x as f64 - screen_x;
+                        let dy = pos.y as f64 - screen_y;
+                        if dx * dx + dy * dy < 100.0 {
+                            let poi_id = poi.id;
+                            drop(pois);
+                            drop(map_state);
+                            return Some(canvas::Action::publish(
+                                crate::app::Message::SelectPoi(poi_id),
+                            ));
+                        }
+                    }
+                    drop(pois);
+                    drop(map_state);
+
                     state.dragging = true;
                     state.last_cursor = Some(pos);
                     return Some(canvas::Action::capture());
@@ -165,6 +202,39 @@ impl Program<crate::app::Message, cosmic::Theme, cosmic::Renderer> for MapCanvas
                 );
             }
         }
+
+        // Draw POIs
+        let pois = self.pois.lock().unwrap();
+        let selected = *self.selected_poi_id.lock().unwrap();
+        let (cx, cy) = map_state.center_tile();
+        for poi in pois.iter() {
+            let (tx, ty) = map_state.lat_lon_to_tile(poi.lat, poi.lon);
+            let screen_x = (tx - cx) * 256.0 + vw as f64 / 2.0;
+            let screen_y = (ty - cy) * 256.0 + vh as f64 / 2.0;
+
+            if screen_x >= -10.0
+                && screen_x <= bounds.width as f64 + 10.0
+                && screen_y >= -10.0
+                && screen_y <= bounds.height as f64 + 10.0
+            {
+                let center = Point::new(screen_x as f32, screen_y as f32);
+                let is_selected = selected == Some(poi.id);
+                let radius = if is_selected { 7.0 } else { 5.0 };
+                let color = if is_selected {
+                    Color::from_rgb8(0xFF, 0x99, 0x00)
+                } else {
+                    Color::from_rgb8(0x00, 0x77, 0xCC)
+                };
+                // White outline
+                frame.fill(
+                    &Path::circle(center, radius + 2.0),
+                    Color::from_rgb8(0xFF, 0xFF, 0xFF),
+                );
+                // Colored dot
+                frame.fill(&Path::circle(center, radius), color);
+            }
+        }
+        drop(pois);
 
         // Draw current location marker if known
         if let Some((lat, lon)) = *self.current_location.lock().unwrap() {

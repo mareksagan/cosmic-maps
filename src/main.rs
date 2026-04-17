@@ -7,6 +7,7 @@ mod i18n;
 mod location;
 mod map;
 mod menu;
+mod poi;
 mod search;
 
 fn main() -> cosmic::iced::Result {

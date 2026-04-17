@@ -4,6 +4,7 @@ use cosmic::iced::widget::image::Handle;
 use image::RgbaImage;
 use lru::LruCache;
 use std::num::NonZeroUsize;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 const USER_AGENT: &str = "COSMIC Maps/0.1.0 (https://github.com/example/cosmic-maps)";
@@ -18,6 +19,33 @@ fn http_client() -> &'static reqwest::Client {
             .build()
             .expect("Failed to build HTTP client")
     })
+}
+
+fn cache_dir() -> PathBuf {
+    let base = std::env::var("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| String::from("."));
+            PathBuf::from(home).join(".cache")
+        });
+    base.join("com.system76.CosmicMaps").join("tiles")
+}
+
+fn tile_path(id: &TileId) -> PathBuf {
+    cache_dir().join(format!("{}/{}/{}", id.z, id.x, id.y))
+}
+
+fn save_tile_to_disk(id: &TileId, bytes: &[u8]) {
+    let path = tile_path(id);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, bytes);
+}
+
+fn load_tile_from_disk(id: &TileId) -> Option<Vec<u8>> {
+    let path = tile_path(id);
+    std::fs::read(&path).ok()
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -50,10 +78,57 @@ impl Default for TileCache {
 
 impl TileCache {
     pub fn new(capacity: usize) -> Self {
+        let inner = Arc::new(Mutex::new(LruCache::new(
+            NonZeroUsize::new(capacity).unwrap(),
+        )));
+
+        // Preload any existing disk tiles into memory
+        if let Ok(entries) = std::fs::read_dir(cache_dir()) {
+            for entry in entries.flatten() {
+                let z = entry.file_name().to_string_lossy().parse::<u8>().ok();
+                let z_dir = entry.path();
+                if z.is_none() || !z_dir.is_dir() {
+                    continue;
+                }
+                let z = z.unwrap();
+                if let Ok(x_entries) = std::fs::read_dir(&z_dir) {
+                    for x_entry in x_entries.flatten() {
+                        let x = x_entry.file_name().to_string_lossy().parse::<u64>().ok();
+                        let x_dir = x_entry.path();
+                        if x.is_none() || !x_dir.is_dir() {
+                            continue;
+                        }
+                        let x = x.unwrap();
+                        if let Ok(y_entries) = std::fs::read_dir(&x_dir) {
+                            for y_entry in y_entries.flatten() {
+                                let name = y_entry.file_name().to_string_lossy().to_string();
+                                let y = name.parse::<u64>().ok();
+                                if y.is_none() {
+                                    continue;
+                                }
+                                let y = y.unwrap();
+                                let id = TileId { z, x, y };
+                                if let Some(bytes) = load_tile_from_disk(&id) {
+                                    if let Ok(img) = image::load_from_memory_with_format(
+                                        &bytes,
+                                        image::ImageFormat::Png,
+                                    ) {
+                                        let rgba = img.to_rgba8();
+                                        let _ = inner
+                                            .lock()
+                                            .unwrap()
+                                            .put(id, image_handle_from_rgba(rgba));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Self {
-            inner: Arc::new(Mutex::new(LruCache::new(
-                NonZeroUsize::new(capacity).unwrap(),
-            ))),
+            inner,
             pending: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
@@ -102,6 +177,18 @@ impl TileCache {
 }
 
 pub async fn fetch_tile(id: TileId) -> Result<Handle, String> {
+    // Try disk cache first
+    if let Some(bytes) = load_tile_from_disk(&id) {
+        tracing::trace!("fetch_tile {id:?}: loaded from disk");
+        let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+            .map_err(|e| {
+                tracing::warn!("fetch_tile {id:?}: decode disk cache failed: {e}");
+                e.to_string()
+            })?
+            .to_rgba8();
+        return Ok(image_handle_from_rgba(img));
+    }
+
     tracing::trace!("fetch_tile: {id:?} url={}", id.url());
     let client = http_client();
     let bytes = client
@@ -121,6 +208,9 @@ pub async fn fetch_tile(id: TileId) -> Result<Handle, String> {
         })?;
 
     tracing::trace!("fetch_tile {id:?}: received {} bytes", bytes.len());
+
+    // Save to disk cache
+    save_tile_to_disk(&id, &bytes);
 
     let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
         .map_err(|e| {
