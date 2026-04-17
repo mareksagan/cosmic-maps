@@ -4,10 +4,21 @@ use cosmic::iced::widget::image::Handle;
 use image::RgbaImage;
 use lru::LruCache;
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 const USER_AGENT: &str = "COSMIC Maps/0.1.0 (https://github.com/example/cosmic-maps)";
 const MAX_RETRIES: u8 = 3;
+const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(FETCH_TIMEOUT)
+            .build()
+            .expect("Failed to build HTTP client")
+    })
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TileId {
@@ -92,7 +103,7 @@ impl TileCache {
 
 pub async fn fetch_tile(id: TileId) -> Result<Handle, String> {
     tracing::trace!("fetch_tile: {id:?} url={}", id.url());
-    let client = reqwest::Client::new();
+    let client = http_client();
     let bytes = client
         .get(id.url())
         .header("User-Agent", USER_AGENT)

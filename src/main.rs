@@ -21,5 +21,5 @@ fn main() -> cosmic::iced::Result {
             .min_height(480.0),
     );
 
-    cosmic::app::run::<app::AppModel>(settings, ())
+    cosmic::app::run_single_instance::<app::AppModel>(settings, app::AppFlags::default())
 }

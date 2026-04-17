@@ -26,6 +26,14 @@ use std::time::Duration;
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const APP_ICON: &[u8] = include_bytes!("../resources/icons/hicolor/scalable/apps/com.system76.CosmicMaps.svg");
 
+#[derive(Clone, Debug, Default)]
+pub struct AppFlags;
+
+impl cosmic::app::CosmicFlags for AppFlags {
+    type SubCommand = String;
+    type Args = Vec<String>;
+}
+
 pub struct AppModel {
     core: Core,
     context_page: ContextPage,
@@ -89,7 +97,7 @@ pub enum ContextPage {
 
 impl Application for AppModel {
     type Executor = cosmic::executor::Default;
-    type Flags = ();
+    type Flags = AppFlags;
     type Message = Message;
 
     const APP_ID: &'static str = "com.system76.CosmicMaps";
