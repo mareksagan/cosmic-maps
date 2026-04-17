@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=COSMIC Maps
+Comment=OpenStreetMap viewer for the COSMIC Desktop
+Type=Application
+Icon=com.system76.CosmicMaps
+Exec=cosmic-maps %F
+Categories=Utility;Maps;Geography;
+MimeType=
+Keywords=Map;OpenStreetMap;OSM;GPS;
+Terminal=false
